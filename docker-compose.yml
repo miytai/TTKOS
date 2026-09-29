@@ -1,0 +1,414 @@
+name: forumos
+
+x-backend-env: &backend-env
+  DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-config.settings.dev}
+  DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
+  DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+  DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,backend}
+  APP_VERSION: ${APP_VERSION:-1.0.0}
+  APP_HOST: ${APP_HOST:-http://localhost:8080}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  POSTGRES_DB: ${POSTGRES_DB:-forumos}
+  POSTGRES_USER: ${POSTGRES_USER:-forumos}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+  POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+  POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+  REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+  CHANNELS_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+  CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
+  CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/4
+  RATE_LIMIT_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/3
+  KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+  KAFKA_ENABLED: "true"
+  ELASTIC_URL: ${ELASTIC_URL:-http://elasticsearch:9200}
+  ELASTIC_USERNAME: elastic
+  ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:?set ELASTIC_PASSWORD in .env}
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-forumos}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+  AWS_STORAGE_BUCKET_NAME: ${MINIO_BUCKET:-forumos-media}
+  AWS_S3_ENDPOINT_URL: http://minio:9000
+  AWS_S3_REGION_NAME: us-east-1
+  AWS_QUERYSTRING_AUTH: "false"
+  USE_S3_STORAGE: ${USE_S3_STORAGE:-false}
+  JWT_ACCESS_TTL_MINUTES: ${JWT_ACCESS_TTL_MINUTES:-15}
+  JWT_REFRESH_TTL_DAYS: ${JWT_REFRESH_TTL_DAYS:-7}
+  JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?set JWT_SIGNING_KEY in .env}
+  EMAIL_VERIFICATION_TTL_HOURS: ${EMAIL_VERIFICATION_TTL_HOURS:-24}
+  PASSWORD_RESET_TTL_HOURS: ${PASSWORD_RESET_TTL_HOURS:-1}
+  EMAIL_BACKEND: ${EMAIL_BACKEND:-django.core.mail.backends.console.EmailBackend}
+  EMAIL_HOST: ${EMAIL_HOST:-localhost}
+  EMAIL_PORT: ${EMAIL_PORT:-1025}
+  EMAIL_HOST_USER: ${EMAIL_HOST_USER:-}
+  EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD:-}
+  EMAIL_FROM: ${EMAIL_FROM:-no-reply@forumos.local}
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8080}
+  CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://localhost:8080}
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  DJANGO_SUPERUSER_PASSWORD: ${DJANGO_SUPERUSER_PASSWORD:-admin}
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-forumos}
+      POSTGRES_USER: ${POSTGRES_USER:-forumos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-forumos} -d ${POSTGRES_DB:-forumos}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+      - --appendonly
+      - "yes"
+      - --maxmemory-policy
+      - allkeys-lru
+    volumes:
+      - redisdata:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD} ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *default-logging
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    restart: unless-stopped
+    environment:
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-MkU3OEVBNTcwNTJENDM2Qk}
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: ${KAFKA_AUTO_CREATE_TOPICS:-false}
+      KAFKA_NUM_PARTITIONS: ${KAFKA_PARTITIONS:-3}
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_HEAP_OPTS: "-Xmx768M -Xms256M"
+    volumes:
+      - kafkadata:/var/lib/kafka/data
+    ports:
+      - "${KAFKA_HOST_PORT:-9092}:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:29092 --list || exit 1"]
+      interval: 10s
+      timeout: 15s
+      retries: 30
+      start_period: 30s
+    logging: *default-logging
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_PARTITIONS: ${KAFKA_PARTITIONS:-3}
+    entrypoint: ["/bin/bash", "/scripts/create-topics.sh"]
+    volumes:
+      - ./infra/kafka/create-topics.sh:/scripts/create-topics.sh:ro
+    restart: "no"
+    logging: *default-logging
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "true"
+      xpack.security.http.ssl.enabled: "false"
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:?set ELASTIC_PASSWORD in .env}
+      bootstrap.memory_lock: "false"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -u elastic:${ELASTIC_PASSWORD} http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 40s
+    logging: *default-logging
+
+  minio:
+    image: bitnamilegacy/minio:latest
+    restart: unless-stopped
+    entrypoint: ["minio", "server", "/data", "--console-address", ":9001"]
+    user: "0:0"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-forumos}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    volumes:
+      - miniodata:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    logging: *default-logging
+
+  minio-init:
+    image: bitnamilegacy/minio-client:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-forumos}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+      MINIO_BUCKET: ${MINIO_BUCKET:-forumos-media}
+    entrypoint: ["/bin/sh", "/scripts/setup.sh"]
+    volumes:
+      - ./infra/minio/setup.sh:/scripts/setup.sh:ro
+    restart: "no"
+    logging: *default-logging
+
+  migrate:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: forumos-backend:latest
+    command: python manage.py migrate --noinput
+    environment:
+      <<: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: "no"
+    logging: *default-logging
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: forumos-backend:latest
+    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-4} --timeout 60 --access-logfile - --error-logfile -
+    environment:
+      <<: *backend-env
+    volumes:
+      - staticfiles:/app/staticfiles
+      - mediaroot:/app/media
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health/', timeout=5).status==200 else 1)\""]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    logging: *default-logging
+
+  channels:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: forumos-backend:latest
+    command: daphne -b 0.0.0.0 -p 8001 config.asgi:application --proxy-headers --access-log -
+    environment:
+      <<: *backend-env
+    volumes:
+      - mediaroot:/app/media
+    ports:
+      - "8001:8001"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket,sys; s=socket.create_connection(('localhost',8001),5); s.close()\""]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    logging: *default-logging
+
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: forumos-backend:latest
+    command: celery -A config.celery worker --loglevel=${LOG_LEVEL:-INFO} -Q default,notifications,search,analytics --concurrency=${CELERY_CONCURRENCY:-4}
+    environment:
+      <<: *backend-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    volumes:
+      - mediaroot:/app/media
+    logging: *default-logging
+
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: forumos-backend:latest
+    command: celery -A config.celery beat --loglevel=${LOG_LEVEL:-INFO} --schedule=/tmp/celerybeat-schedule
+    environment:
+      <<: *backend-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    logging: *default-logging
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-/api}
+        VITE_WS_URL: ${VITE_WS_URL:-}
+    image: forumos-frontend:latest
+    environment:
+      API_UPSTREAM: backend:8000
+      WS_UPSTREAM: channels:8001
+    depends_on:
+      - backend
+      - channels
+    logging: *default-logging
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx/conf.d/forumos.conf:/etc/nginx/conf.d/forumos.conf:ro
+      - ./infra/nginx/proxy_params_forumos.conf:/etc/nginx/proxy_params_forumos.conf:ro
+      - staticfiles:/var/www/static:ro
+      - mediaroot:/var/www/media:ro
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+      - channels
+      - frontend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost/api/health/ >/dev/null && exit 0 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    logging: *default-logging
+
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["observability"]
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "9090:9090"
+    logging: *default-logging
+
+  loki:
+    image: grafana/loki:latest
+    profiles: ["observability"]
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./infra/loki/loki.yml:/etc/loki/loki.yml:ro
+      - lokidata:/loki
+    ports:
+      - "3100:3100"
+    logging: *default-logging
+
+  promtail:
+    image: grafana/promtail:latest
+    profiles: ["observability"]
+    command: -config.file=/etc/promtail/promtail.yml
+    volumes:
+      - ./infra/loki/promtail.yml:/etc/promtail/promtail.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    logging: *default-logging
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+      - loki
+    logging: *default-logging
+
+volumes:
+  pgdata:
+  redisdata:
+  kafkadata:
+  esdata:
+  miniodata:
+  staticfiles:
+  mediaroot:
+  promdata:
+  lokidata:
+  grafanadata:

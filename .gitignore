@@ -1,0 +1,44 @@
+# ── Python ────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ── Node ──────────────────────────────────────────────────
+node_modules/
+dist/
+.vite/
+coverage/
+*.tsbuildinfo
+
+# ── Django ────────────────────────────────────────────────
+backend/media/
+backend/staticfiles/
+backend/.env
+*.sqlite3
+
+# ── Секреты ───────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── IDE / OS ──────────────────────────────────────────────
+.idea/
+.vscode/
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+
+# ── Локальные данные сервисов ─────────────────────────────
+.localdata/
+data/
+*.log
